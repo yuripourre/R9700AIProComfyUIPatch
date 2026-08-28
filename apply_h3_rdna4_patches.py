@@ -140,15 +140,24 @@ NEW_ATTN = """        out = None
         # Only worth it on the long packed sequence. The 2 token-refiner layers
         # run a few hundred text tokens, where the win is nil and autotuning a
         # separate kernel per shape costs more than it saves.
-        flex = _flex_attention_fn() if q.shape[2] >= FLEX_MIN_SEQ else None
+        # ComfyUI 0.32 wraps q/k/v in AttentionTensorContainer; 0.30 passed tensors.
+        q_t = q.peek() if hasattr(q, "peek") else q
+        flex = _flex_attention_fn() if q_t.shape[2] >= FLEX_MIN_SEQ else None
         if flex is not None:
             try:
+                # peek, don't take: if flex fails we still owe the tensors to SDPA.
                 # no .contiguous(): q/k/v are strided views of the packed qkv
                 # buffer and copying them is expensive. Inductor handles strides.
-                o = flex(q, k, v)
+                k_t = k.peek() if hasattr(k, "peek") else k
+                v_t = v.peek() if hasattr(v, "peek") else v
+                o = flex(q_t, k_t, v_t)
                 # flex returns [1, heads, seq, head_dim]; optimized_attention
                 # hands back [1, seq, heads*head_dim] already flattened.
                 out = o.transpose(1, 2).reshape(1, o.shape[2], self.heads * self.head_dim)
+                if hasattr(q, "take"):
+                    q.take()
+                    k.take()
+                    v.take()
             except Exception as e:
                 if _flex_attention_mode() == "force":
                     raise
